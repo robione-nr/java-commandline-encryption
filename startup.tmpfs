@@ -1,0 +1,43 @@
+! /bin/bash
+if [ ! -d /home/$USER/ramdisk ] 
+then
+        mkdir /home/$USER/ramdisk
+fi
+
+if [ ! -d /home/$USER/.browser-cache ] 
+then
+        mkdir /home/$USER/.browser-cache
+fi
+
+len=`mount | grep ramdisk`
+len=`expr length "${len}"`
+
+if [ $len -eq 0 ] 
+then
+        echo '<<your-password>>' | sudo -S -p '' mount -t tmpfs -o rw,size=64M tmpfs /home/$USER/ramdisk
+        sudo mount -t tmpfs -o rw,size=1G tmpfs /home/$USER/.browser-cache
+
+        # Files for Firefox
+        touch ~/ramdisk/cookies.sqlite
+        touch ~/ramdisk/cookies.sqlite-wal
+        touch ~/ramdisk/favicons.sqlite
+        touch ~/ramdisk/favicons.sqlite-wal
+        touch ~/ramdisk/places.sqlite
+        touch ~/ramdisk/places.sqlite-wal
+
+        # Files for Brave Browser
+        touch ~/ramdisk/Cookies
+        touch ~/ramdisk/Cookies-journal
+        touch ~/ramdisk/Favicons
+        touch ~/ramdisk/Favicons-journal
+        touch ~/ramdisk/History
+        touch ~/ramdisk/History-journal
+fi
+
+len=`nordvpn status | grep -i -- disconnected`
+len=`expr length "${len}"`
+
+if [ $len -gt 0 ] 
+then
+        nordvpn connect <<country-of-choice>>
+fi
