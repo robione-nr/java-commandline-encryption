@@ -46,13 +46,21 @@ import javax.crypto.CipherOutputStream;
 
 
 public class Aes256GcmStream {
+    private final static int UNDEFINED = 0x0000;
+    private final static int ENCRYPT_MODE = 0x0001;
+    private final static int DECRYPT_MODE = 0x0002;
+
+    private static HashMap<Character,String> options = new HashMap<>();
+    private static int mode = UNDEFINED;
+    private static short saltSize = 100;
+    private static boolean compression = false;
+    private static Path in = null, out = null;
+
     private static Key key;
     private static char[] phrase;
     private static Salt salt;
     private static byte[] IV = new byte[12];
 
-    //Helper variables
-    private static short saltSize = 100;
 
     public static void main(String[] args) {
         OutputStream ostream = null;        InputStream istream = null;
@@ -61,121 +69,262 @@ public class Aes256GcmStream {
         FileOutputStream fos = null;        FileInputStream fis = null;
         CipherOutputStream cos = null;      CipherInputStream cis = null;
 
-        boolean encrypt = true, zip = false;
-        Path in = null,out = null;
-
         byte[] buffer = new byte[1<<14]; //16k
-       
-        try {
-            //Command line arguments
-            for(int i=0; i<args.length; ++i) {
-                if(args[i].equals("-d"))        encrypt = false;
-                else if(args[i].equals("-e"))   encrypt = true;
-                else if(args[i].equals("-z"))   zip = true;
-                else if(args[i].equals("-s"))   saltSize = Short.parseShort(args[++i]);
-                else if(args[i].equals("-i"))   {
-                    in = Paths.get(args[++i]);
-                    if(!Files.exists(in)) throw new FileNotFoundException("The specified input file does not exist.");
-                }
-                else if(args[i].equals("-o"))   out = Paths.get(args[++i]);
-                else if(args[i].equals("-v"))   System.console().printf("Java AES-256 GCM Encoder/Decoder V1.1\n");
-                else {
-                    System.console().printf("%s\n\n%s\n\n%s\n\t%s\n\t%s\n\n%s\n\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n",
-                        "USAGE: `java 'aes-class-name'.java` [OPTIONS] [2>/dev/null]",
-                        "USAGE: `java -jar 'jar-file'` [OPTIONS] [2>/dev/null]",
-                        "USAGE: Using an aliased example (Used as above with `-d/-e` ---",
-                        "`encrypt -i <file> -o <file>`",
-                        "`decrypt -i <file> -o <file>`",
-                        "Options:",
-                        "-d/-e: Mutually exclusive. Encrypt or decrypt the input file.",
-                        "-i <input-file>: Required. File to be de-/en-crypted.",
-                        "-o <output-file>: Required. Destination file. (Default: stdout)",
-                        "-s <integer>: Salt length in bytes. Default 100.",
-                        "-v: Version info.");
-                    System.exit(0);
-                }
-            }
+        Cipher cipher = null;
 
-            //Mop up state
-            if(out == null)     out = Paths.get("/dev/stdout");
-            if(in == null)      throw new FileNotFoundException("Please specify an input file.");
+        //***** PARSE COMMANDLINE OPTIONS
+        parseArgs(args);
+        updateState();
 
-            if(encrypt) {   //**** ENCRYPT SETUP *****//
-                //Setup Passphrase
-                char[] confirmation;
-                boolean looped = false;
+        //***** SETUP ENCRYPTION/DECRYPTION OPERATION
+        if(mode ==  ENCRYPT_MODE) {
 
-                do {
-                    if(looped) System.console().printf("\nPhrase mismatch. Please try again.\n");
+            char[] confirmation;
+            boolean looped = false;
+ 
+            do {
+                if(looped) System.console().printf("\nPhrase mismatch. Please try again.\n");
 
-                    phrase = System.console().readPassword("Enter Key Phrase: ");
-                    confirmation = System.console().readPassword("Confirm Phrase: ");
+                phrase = System.console().readPassword("Enter Key Phrase: ");
+                confirmation = System.console().readPassword("Confirm Phrase: ");
 
-                    looped = true;
-                } while(!Arrays.equals(phrase, confirmation));
+                looped = true;
+            } while(!Arrays.equals(phrase, confirmation));
 
-                //Setup encryption and prepare output
-                salt = new Salt(saltSize);
-                new SecureRandom().nextBytes(IV);
+            salt = new Salt(saltSize);
+            new SecureRandom().nextBytes(IV);
 
-                Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            try {
+                cipher = Cipher.getInstance("AES/GCM/NoPadding");
                 key = AES256Key.getPBK(phrase, salt);
                 GCMParameterSpec gcmParameterSpec = new GCMParameterSpec(128, IV);
                 cipher.init(Cipher.ENCRYPT_MODE, key, gcmParameterSpec);
+            } catch(Exception e) {
+                exit("\nERROR: Could not initialize cipher", null);
+            }
 
+            try {
                 cos = new CipherOutputStream(
                         bos = new BufferedOutputStream(
                         fos = new FileOutputStream(out.toFile())), cipher);
                 
-                if(zip) ostream = gos = new GZIPOutputStream(cos);
+                if(compression) ostream = gos = new GZIPOutputStream(cos);
                 else ostream = cos;
 
                 istream = bis = new BufferedInputStream(fis = new FileInputStream(in.toFile()));
+            } catch(Exception e) {
+                exit("ERROR: Issues encountered while initializing I/O files and streams.", null);
+            }
                 
+            try {
                 bos.write(IV);
                 bos.write(ByteBuffer.allocate(Short.BYTES).putShort(saltSize).array());
                 bos.write(salt.getBytes());
+            } catch(Exception e) {
+                exit("ERROR: Could not write output file header.", null);
+            }
 
-            } else {    //***** DECRYPTION SETUP  *****/
-                
-                bis =   new BufferedInputStream(fis = new FileInputStream(in.toFile()));
+        } else if(mode == DECRYPT_MODE) {
+
+            try {
+                bis = new BufferedInputStream(fis = new FileInputStream(in.toFile()));
 
                 bis.read(IV);
                 bis.read(buffer,0,Short.BYTES);
                 saltSize = ByteBuffer.wrap(buffer,0,Short.BYTES).getShort();
                 salt = new Salt(saltSize, false);
                 bis.read(salt.getBytes());
+            } catch(Exception e) {
+                exit("ERROR: Issues encountered while initializing I/O files and streams.", null);
+            }
 
-                //Decrypt
-                phrase = System.console().readPassword("Key Phrase: ");
+            phrase = System.console().readPassword("Key Phrase: ");
 
-                Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            try {
+                cipher = Cipher.getInstance("AES/GCM/NoPadding");
                 key = AES256Key.getPBK(phrase, salt);
                 GCMParameterSpec gcmParameterSpec = new GCMParameterSpec(128, IV);
                 cipher.init(Cipher.DECRYPT_MODE, key, gcmParameterSpec);
+            } catch(Exception e) {
+                exit("\nERROR: Could not initialize cipher", e);
+            }
 
+            try {
                 cis = new CipherInputStream(bis, cipher);
-                if(zip) istream = gis = new GZIPInputStream(cis);
+                if(compression) istream = gis = new GZIPInputStream(cis);
                 else    istream = cis;
                 
                 ostream = bos = new BufferedOutputStream(fos = new FileOutputStream(out.toFile()));
+            } catch(Exception e) {
+                exit("ERROR: Issues encountered while initializing I/O files and streams.", null);
             }
 
-            //***** EXECUTION
-            int length = 0;
+        } else {
+            exit("Undefined internal state.",null);
+        }
 
+        //***** EXECUTION
+        int length = 0;
+
+        try {
             while((length = istream.read(buffer)) > 0)
                 ostream.write(buffer, 0, length);
+        } catch(Exception e) {
+            exit("ERROR: Issues while performing cipher operations.", null);
+        }
 
-            //**** CLEAN UP
+        //**** CLEAN UP
+        try {
             if(gis != null) gis.close();        if(gos != null) gos.close();
             if(cis != null) cis.close();        if(cos != null) cos.close();
             if(bis != null) bis.close();        if(bos != null) bos.close();
             if(fis != null) fis.close();        if(fos != null) fos.close();
-        } catch (Exception e) {
-            e.printStackTrace();
-            try{Files.deleteIfExists(out);} catch (Exception _e) {}
-        }        
+        } catch(Exception e) {
+            exit("ERROR: Issue encountered while closing I/O streams.", null);
+        }
+    }
+
+    private static void exit(String msg, Exception e) {
+        System.console().printf("\n%s\n\n",msg);
+        if(e != null) e.printStackTrace();
+        try{Files.deleteIfExists(out);} catch (Exception _e) {}
+        System.exit(0);
+    }
+
+    private static void insert(HashMap<Character, String> hm, Character key) {
+        insert(hm,key,"");
+    }
+
+    private static void insert(HashMap<Character, String> hm, Character key, String value) {
+        if(hm.containsKey(key)) usage("Duplicate key: "+key);
+        hm.put(key, value);
+    }
+
+    private static void updateState() {
+        options.forEach((k,v) -> {
+            if(k == 'v')        System.console().printf("Java AES-256 GCM Encoder/Decoder V1.1.2\n");
+            else if(k == 'z')   compression = true;
+            else if(k == 'i')   {
+                in = Paths.get(v);
+                if(!Files.exists(in)) {
+                    System.console().printf("ERROR: The specified input file does not exist.");
+                    System.exit(0);
+                }
+            }
+            else if(k == 'o')   out = Paths.get(v);
+            else if(k == 'e')   mode = ENCRYPT_MODE;
+            else if(k == 'd')   mode = DECRYPT_MODE;
+            //Salt size handled during parsing.
+        });
+
+        if(out == null)     out = Paths.get("/dev/stdout");
+        options.clear();
+    }
+
+    private static void parseArgs(String[] args) {
+        if(args.length < 3) usage("Missing required arguments.");
+        for(int i = 0; i < args.length; ++i)
+            if(args[i].charAt(0) == '-') {
+                if(args[i].charAt(1) == '-')
+                    switch(args[i].substring(2)) {
+                        case "version": args[i] = "-v"; break;
+                        case "input":   args[i] = "-i"; break;
+                        case "output":  args[i] = "-o"; break;
+                        case "zip":
+                        case "gzip":    args[i] = "-z"; break;
+                        case "salt":    args[i] = "-s"; break;
+                        case "encrypt": args[i] = "-e"; break;
+                        case "decrypt": args[i] = "-d"; break;
+                        default:        usage("Unexpected token: "+args[i]);
+                    }
+    
+                i = parseOptions(args, i);
+            } else 
+                usage("Unexpected token: "+args[i]);
+        
+        if(!options.containsKey('i') ||
+            (!options.containsKey('d') && !options.containsKey('e')))
+    
+            usage("Missing required arguments.");
+    }
+
+    private static int parseOptions(String[] argv, int index) {
+        int len, offset = 0, next = index+1;
+        for(int i = 1; i < (len = argv[index].length()); ++i)
+            switch(argv[index].charAt(i)) {
+                case 'v':   insert(options,'v');
+                            break;
+
+                case 'i':   if(len > 2)
+                                usage("Option (-i) cannot be grouped. Refer to format below.");
+
+                            insert(options,'i',argv[next]);
+                            ++offset;
+                            break;
+
+                case 'o':   if(len > 2)
+                                usage("Option (-o) cannot be grouped. Refer to format below.");
+
+                            insert(options,'o',argv[next]);
+                            ++offset;
+                            break;
+
+                case 'z':   insert(options,'z');
+                            break;
+
+                case 's':   if(len > 2)
+                                usage("Option (-s) cannot be grouped. Refer to format below.");
+                            
+                            try{
+                                    saltSize = Short.parseShort(argv[next]);
+                                    ++offset;
+                            } catch(Exception e) {usage("Unexpected token: "+argv[index]);}
+
+                            if(saltSize < 0) usage("Positive values for salt sizes.");
+                            insert(options,'s',argv[next]);
+                            break;
+
+                case 'e':   if(options.containsKey('d')) usage("Encryption and decryption are mutually exclusive options.");
+                            insert(options,'e');
+                            break;
+
+                case 'd':   if(options.containsKey('e')) usage("Encryption and decryption are mutually exclusive options.");
+                            insert(options,'d');
+                            break;
+
+                default:    usage("Unexpected character '"+argv[index].charAt(i)+"' in token: "+argv[index]);
+
+            }
+
+        return index + offset;
+    }
+
+    private static void usage(String msg) {
+        if(msg != null)
+            System.console().printf("%s\n", msg);
+
+        System.console().printf("\n%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
+        "USAGE (class):\t`java <main-class>` [OPTIONS] [2>/dev/null]\n",
+        "USAGE (jar):\t`java -jar <jar-file>` [OPTIONS] [2>/dev/null]\n",
+        "USAGE: An alias can be defined in your shell's rc file such a\n",
+        "       alias encrypt='java -jar <jar-file> -e'\n\n",
+        "Options: -e|d[zv] -i <input-file> [-o <output-file>] [-s <integer>]\n\n",
+        "    REQUIRED:\n",
+        "   -e, --encrypt: Encrypts the input file. Mutually exclusive with decryption.\n",
+        "   -d, --decrypt: Decrypts the input file. Mutually exclusive with encryption.\n",
+        "   -i, --input: File to receive cipher operation.\n\n",
+        "    OPTIONAL:\n",
+        "   -z, --[g]zip: Compresses the input file / Decompresses output file using gzip.\n",
+        "   -o, --output: Destination file. If none is specified output is\n",
+        "                 directed to stdout.\n",
+        "   -s, --salt: Salt length in bytes. Defaults to 100. Must be positive.\n",
+        "   -v, --version: Version info.\n\n",
+        "Note: Grouping is important, not option order.\n\n",
+        "Example: `java -jar /usr/local/aes256gcm -ez --salt 256 -i ~/file.txt`\n",
+        "    -or- `encrypt --salt 256 --input ~/file.txt --zip`"
+        );
+
+        System.exit(0);
     }
 }
 
